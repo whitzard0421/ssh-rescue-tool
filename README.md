@@ -4,7 +4,7 @@
 
 ## 快速使用
 ```bash
-wget -O ssh-rescue https://raw.githubusercontent.com/你的用户名/ssh-rescue-tool/main/ssh-rescue.sh
+wget -O ssh-rescue https://raw.githubusercontent.com/whitzard0421/ssh-rescue-tool/main/ssh-rescue.sh
 chmod +x ssh-rescue
 ./ssh-rescue
 ```

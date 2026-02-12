@@ -498,6 +498,7 @@ step_firewall() {
 step_fail2ban() {
     log_step "配置 Fail2Ban 防暴力破解"
     local ssh_port
+    local ssh_unit="ssh.service"
     ssh_port=$(detect_sshd_port)
     if ! is_valid_port "$ssh_port"; then
         log_error "无法识别有效 SSH 端口，取消 Fail2Ban 配置"
@@ -507,6 +508,10 @@ step_fail2ban() {
     # 安装 Fail2Ban
     apt install fail2ban -y
     
+    if systemctl list-unit-files --type=service 2>/dev/null | awk '{print $1}' | grep -qx 'sshd.service'; then
+        ssh_unit="sshd.service"
+    fi
+
     # 创建本地配置
     cat > /etc/fail2ban/jail.local <<EOF
 [DEFAULT]
@@ -523,18 +528,44 @@ ignoreip = 127.0.0.1/8 ::1
 enabled = true
 port = ${ssh_port}
 filter = sshd
-logpath = /var/log/auth.log
 maxretry = 3
 bantime = 7200
 EOF
+
+    # Debian 12+/极简系统可能没有 /var/log/auth.log，改用 systemd backend
+    if [ ! -f /var/log/auth.log ]; then
+        cat >> /etc/fail2ban/jail.local <<EOF
+backend = systemd
+journalmatch = _SYSTEMD_UNIT=${ssh_unit} + _COMM=sshd
+EOF
+        log_info "检测到 /var/log/auth.log 不存在，Fail2Ban 使用 systemd 日志后端"
+    else
+        echo "logpath = /var/log/auth.log" >> /etc/fail2ban/jail.local
+        log_info "Fail2Ban 使用 /var/log/auth.log"
+    fi
+
+    if ! fail2ban-client -t >/dev/null 2>&1; then
+        log_error "Fail2Ban 配置校验失败，请检查 /etc/fail2ban/jail.local"
+        return 1
+    fi
     
     # 重启服务
     systemctl restart fail2ban
-    systemctl enable fail2ban
-    
-    log_info "Fail2Ban 已配置并启动"
-    sleep 2
-    fail2ban-client status sshd
+    systemctl enable fail2ban >/dev/null 2>&1 || true
+    sleep 1
+
+    if systemctl is-active --quiet fail2ban; then
+        log_info "Fail2Ban 已配置并启动"
+        if ! fail2ban-client status sshd; then
+            log_warn "sshd jail 状态读取失败，输出 Fail2Ban 总状态供排查"
+            fail2ban-client status || true
+        fi
+    else
+        log_error "Fail2Ban 启动失败，输出最近日志："
+        systemctl status fail2ban --no-pager -l || true
+        journalctl -u fail2ban --no-pager -n 50 || true
+        return 1
+    fi
 }
 
 # --- 测试函数 ---

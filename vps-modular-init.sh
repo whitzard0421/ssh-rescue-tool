@@ -32,10 +32,11 @@ DEFAULT_HOSTNAME="${OS_NAME}-vps"
 # --- 全局变量 ---
 USERNAME=""
 USER_PASSWORD=""
-SSH_PORT="22222"
+SSH_PORT=""
 NEW_HOSTNAME="$DEFAULT_HOSTNAME"
 SWAP_SIZE="1G"
 SSH_KEY=""
+DEFAULT_NEW_SSH_PORT="22222"
 
 # --- 日志函数 ---
 log_info() {
@@ -66,21 +67,149 @@ is_valid_port() {
     [ "$port" -ge 1 ] && [ "$port" -le 65535 ]
 }
 
-effective_ssh_port() {
-    if [ -z "${SSH_PORT:-}" ] || [ "${SSH_PORT:-}" = "0" ]; then
-        echo "22"
-    else
-        echo "$SSH_PORT"
+detect_admin_user() {
+    local user
+
+    if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER:-}" != "root" ] && id "${SUDO_USER:-}" >/dev/null 2>&1; then
+        echo "${SUDO_USER}"
+        return 0
     fi
+
+    if [ -n "${USER:-}" ] && [ "${USER:-}" != "root" ] && id "${USER:-}" >/dev/null 2>&1; then
+        if id -nG "${USER}" 2>/dev/null | tr ' ' '\n' | grep -qx "sudo"; then
+            echo "${USER}"
+            return 0
+        fi
+    fi
+
+    while IFS=: read -r user _ uid _ _ _ shell; do
+        [ "$uid" -ge 1000 ] || continue
+        [ "$user" = "nobody" ] && continue
+        [ "$shell" = "/usr/sbin/nologin" ] && continue
+        [ "$shell" = "/bin/false" ] && continue
+        if id -nG "$user" 2>/dev/null | tr ' ' '\n' | grep -qx "sudo"; then
+            echo "$user"
+            return 0
+        fi
+    done < <(getent passwd)
+
+    while IFS=: read -r user _ uid _ _ _ shell; do
+        [ "$uid" -ge 1000 ] || continue
+        [ "$user" = "nobody" ] && continue
+        [ "$shell" = "/usr/sbin/nologin" ] && continue
+        [ "$shell" = "/bin/false" ] && continue
+        echo "$user"
+        return 0
+    done < <(getent passwd)
+
+    return 1
 }
 
-detect_sshd_port() {
+detect_ssh_service_name() {
+    if systemctl list-unit-files --type=service 2>/dev/null | awk '{print $1}' | grep -qx "ssh.service"; then
+        echo "ssh"
+        return
+    fi
+    if systemctl list-unit-files --type=service 2>/dev/null | awk '{print $1}' | grep -qx "sshd.service"; then
+        echo "sshd"
+        return
+    fi
+    if systemctl status ssh >/dev/null 2>&1; then
+        echo "ssh"
+        return
+    fi
+    if systemctl status sshd >/dev/null 2>&1; then
+        echo "sshd"
+        return
+    fi
+
+    echo "ssh"
+}
+
+restart_ssh_service() {
+    local svc
+    svc="$(detect_ssh_service_name)"
+    if systemctl restart "$svc" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if [ "$svc" != "ssh" ] && systemctl restart ssh >/dev/null 2>&1; then
+        return 0
+    fi
+    if [ "$svc" != "sshd" ] && systemctl restart sshd >/dev/null 2>&1; then
+        return 0
+    fi
+
+    return 1
+}
+
+reload_ssh_service() {
+    local svc
+    svc="$(detect_ssh_service_name)"
+    if systemctl reload "$svc" >/dev/null 2>&1; then
+        return 0
+    fi
+    restart_ssh_service
+}
+
+detect_sshd_port_runtime() {
     local detected_port
+    local parsed_port
     detected_port=$(sshd -T 2>/dev/null | awk '/^port /{print $2; exit}' || true)
     if is_valid_port "$detected_port"; then
         echo "$detected_port"
+        return
+    fi
+
+    parsed_port=$(
+        {
+            cat /etc/ssh/sshd_config 2>/dev/null
+            cat /etc/ssh/sshd_config.d/*.conf 2>/dev/null || true
+        } | awk '
+            /^[[:space:]]*#/ { next }
+            tolower($1) == "port" && $2 ~ /^[0-9]+$/ { port = $2 }
+            END { if (port != "") print port }
+        '
+    )
+    if is_valid_port "$parsed_port"; then
+        echo "$parsed_port"
     else
-        effective_ssh_port
+        echo "22"
+    fi
+}
+
+effective_ssh_port() {
+    if is_valid_port "${SSH_PORT:-}"; then
+        echo "$SSH_PORT"
+        return
+    fi
+    detect_sshd_port_runtime
+}
+
+detect_sshd_port() {
+    detect_sshd_port_runtime
+}
+
+hydrate_runtime_defaults() {
+    local detected_user
+    local detected_port
+    local detected_host
+
+    if [ -z "${USERNAME:-}" ] || ! id "${USERNAME:-}" >/dev/null 2>&1; then
+        detected_user="$(detect_admin_user || true)"
+        if [ -n "$detected_user" ] && is_valid_username "$detected_user"; then
+            USERNAME="$detected_user"
+        fi
+    fi
+
+    detected_port="$(detect_sshd_port_runtime)"
+    if is_valid_port "$detected_port"; then
+        SSH_PORT="$detected_port"
+    fi
+
+    detected_host="$(hostnamectl --static 2>/dev/null || hostname)"
+    if [ -n "$detected_host" ] && { [ -z "${NEW_HOSTNAME:-}" ] || [ "$NEW_HOSTNAME" = "$DEFAULT_HOSTNAME" ] || [ "$NEW_HOSTNAME" = "0" ]; }; then
+        NEW_HOSTNAME="$detected_host"
     fi
 }
 
@@ -108,11 +237,30 @@ set_sshd_option() {
 
 # --- 信息收集函数（模块化） ---
 collect_username() {
+    local detected_user
+    local input_user
+    local previous_username
+
+    detected_user="$(detect_admin_user || true)"
+    if [ -z "${USERNAME:-}" ] && [ -n "$detected_user" ] && is_valid_username "$detected_user"; then
+        USERNAME="$detected_user"
+    fi
+
     while true; do
-        if [ -n "$USERNAME" ] && is_valid_username "$USERNAME"; then
-            return
+        previous_username="$USERNAME"
+        if [ -n "${USERNAME:-}" ]; then
+            read -r -p "用户名 (回车默认 $USERNAME): " input_user
+            if [ -n "$input_user" ]; then
+                USERNAME="$input_user"
+            fi
+        else
+            read -r -p "输入用户名: " USERNAME
         fi
-        read -r -p "输入新用户名: " USERNAME
+
+        if [ "$USERNAME" != "$previous_username" ]; then
+            USER_PASSWORD=""
+        fi
+
         if is_valid_username "$USERNAME"; then
             return
         fi
@@ -121,25 +269,48 @@ collect_username() {
 }
 
 collect_password() {
-    if [ -z "$USER_PASSWORD" ]; then
-        while true; do
-            read -s -p "设置 $USERNAME 的密码: " pw1
-            echo ""
-            read -s -p "确认密码: " pw2
-            echo ""
-            if [ "$pw1" = "$pw2" ] && [ -n "$pw1" ]; then
-                USER_PASSWORD="$pw1"
-                break
-            fi
-            log_error "密码不匹配或为空，请重新输入！"
-        done
+    local pw1
+    local pw2
+    local reset_confirm
+
+    if [ -n "$USER_PASSWORD" ]; then
+        return
     fi
+
+    if [ -n "${USERNAME:-}" ] && id "$USERNAME" >/dev/null 2>&1; then
+        read -r -p "用户 $USERNAME 已存在，是否重置密码？(y/N): " reset_confirm
+        if [ "$reset_confirm" != "y" ] && [ "$reset_confirm" != "Y" ]; then
+            log_info "跳过密码更新"
+            return
+        fi
+    fi
+
+    while true; do
+        read -s -p "设置 $USERNAME 的密码: " pw1
+        echo ""
+        read -s -p "确认密码: " pw2
+        echo ""
+        if [ "$pw1" = "$pw2" ] && [ -n "$pw1" ]; then
+            USER_PASSWORD="$pw1"
+            break
+        fi
+        log_error "密码不匹配或为空，请重新输入！"
+    done
 }
 
 collect_ssh_port() {
+    local input_port
+    local detected_port
+
+    detected_port="$(detect_sshd_port_runtime)"
+    if ! is_valid_port "${SSH_PORT:-}"; then
+        SSH_PORT="$detected_port"
+    fi
+
     while true; do
-        read -r -p "SSH 端口 (回车默认 $SSH_PORT, 输入 0 保持 22): " input_port
+        read -r -p "SSH 端口 (回车保持当前 $SSH_PORT, 输入 0 使用 22，推荐新端口 $DEFAULT_NEW_SSH_PORT): " input_port
         if [ -z "$input_port" ]; then
+            SSH_PORT="$(effective_ssh_port)"
             return
         fi
         if [ "$input_port" = "0" ]; then
@@ -211,7 +382,22 @@ collect_ssh_key() {
 
 # 一键初始化的完整信息收集
 collect_full_info() {
+    local current_user
+    local current_port
+    local current_host
+
+    USER_PASSWORD=""
+    hydrate_runtime_defaults
+    current_user="${USERNAME:-未检测到}"
+    current_port="$(detect_sshd_port_runtime)"
+    current_host="$(hostnamectl --static 2>/dev/null || hostname)"
+
     echo -e "\n${CYAN}=== VPS 一键初始化配置向导 ===${NC}\n"
+    echo -e "${BLUE}当前系统检测:${NC}"
+    echo "用户: $current_user"
+    echo "SSH 端口: $current_port"
+    echo "主机名: $current_host"
+    echo ""
     
     collect_username
     collect_password
@@ -221,6 +407,12 @@ collect_full_info() {
     collect_ssh_key
     
     echo -e "\n${BLUE}=== 配置确认 ===${NC}"
+    echo "当前系统:"
+    echo "  用户: $current_user"
+    echo "  SSH 端口: $current_port"
+    echo "  主机名: $current_host"
+    echo ""
+    echo "本次计划:"
     echo "用户名: $USERNAME"
     echo "SSH 端口: $SSH_PORT"
     echo "主机名: $NEW_HOSTNAME"
@@ -277,9 +469,17 @@ step_user() {
     log_step "配置用户: $USERNAME"
     
     if id "$USERNAME" &>/dev/null; then
-        log_warn "用户 $USERNAME 已存在，更新密码"
-        echo "$USERNAME:$USER_PASSWORD" | chpasswd
+        if [ -n "${USER_PASSWORD:-}" ]; then
+            log_warn "用户 $USERNAME 已存在，更新密码"
+            echo "$USERNAME:$USER_PASSWORD" | chpasswd
+        else
+            log_info "用户 $USERNAME 已存在，跳过密码更新"
+        fi
     else
+        if [ -z "${USER_PASSWORD:-}" ]; then
+            log_error "新用户必须设置密码"
+            return 1
+        fi
         useradd -m -s /bin/bash "$USERNAME"
         echo "$USERNAME:$USER_PASSWORD" | chpasswd
         log_info "用户 $USERNAME 创建成功"
@@ -302,7 +502,8 @@ step_user() {
 step_ssh() {
     log_step "SSH 安全加固配置"
     
-    CONF="/etc/ssh/sshd_config"
+    local CONF="/etc/ssh/sshd_config"
+    local USER_HOME
     [ ! -f "${CONF}.bak" ] && cp "$CONF" "${CONF}.bak"
     local ssh_port
     ssh_port=$(effective_ssh_port)
@@ -310,6 +511,7 @@ step_ssh() {
         log_error "SSH 端口无效：$ssh_port"
         return 1
     fi
+    SSH_PORT="$ssh_port"
     
     # 部署 SSH 密钥（如果提供）
     if [ -n "$SSH_KEY" ]; then
@@ -361,8 +563,12 @@ step_ssh() {
     
     # 测试配置
     if sshd -t; then
-        systemctl restart ssh
-        log_info "SSH 配置已更新并重启"
+        if restart_ssh_service; then
+            log_info "SSH 配置已更新并重启"
+        else
+            log_error "SSH 服务重启失败（已修改配置，但服务未成功重启）"
+            return 1
+        fi
         if [ "$ssh_port" != "22" ]; then
             echo -e "${YELLOW}============================================${NC}"
             echo -e "${YELLOW}重要提醒：${NC}"
@@ -374,7 +580,8 @@ step_ssh() {
     else
         log_error "SSH 配置有误，已恢复备份"
         cp "${CONF}.bak" "$CONF"
-        systemctl restart ssh
+        restart_ssh_service || true
+        return 1
     fi
 }
 
@@ -383,8 +590,8 @@ step_performance() {
     
     # BBR
     if ! sysctl net.ipv4.tcp_congestion_control | grep -q "bbr"; then
-        echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
-        echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
+        grep -q '^net.core.default_qdisc=fq$' /etc/sysctl.conf || echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
+        grep -q '^net.ipv4.tcp_congestion_control=bbr$' /etc/sysctl.conf || echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
         sysctl -p > /dev/null 2>&1
         log_info "BBR 已启用"
     else
@@ -500,7 +707,10 @@ step_fail2ban() {
     local ssh_port
     local banaction=""
     local banaction_allports=""
-    ssh_port=$(detect_sshd_port)
+    local jail_file="/etc/fail2ban/jail.local"
+    local jail_backup=""
+    local debug_file=""
+    ssh_port=$(detect_sshd_port_runtime)
     if ! is_valid_port "$ssh_port"; then
         log_error "无法识别有效 SSH 端口，取消 Fail2Ban 配置"
         return 1
@@ -508,9 +718,13 @@ step_fail2ban() {
     
     # 安装 Fail2Ban
     apt install fail2ban -y
+    apt install -y python3-systemd >/dev/null 2>&1 || true
     
-    # 优先使用 nftables，其次 iptables
-    if command -v nft >/dev/null 2>&1; then
+    # 封禁后端优先级：UFW(已启用) > nftables > iptables
+    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi '^Status: active'; then
+        banaction="ufw"
+        banaction_allports="ufw"
+    elif command -v nft >/dev/null 2>&1; then
         banaction="nftables-multiport"
         banaction_allports="nftables-allports"
     elif command -v iptables >/dev/null 2>&1; then
@@ -526,8 +740,15 @@ step_fail2ban() {
         fi
     fi
 
-    # 创建本地配置
-    cat > /etc/fail2ban/jail.local <<EOF
+    if [ -f "$jail_file" ] && ! grep -q '^# Managed by vps-modular-init.sh$' "$jail_file"; then
+        jail_backup="${jail_file}.bak.$(date +%s)"
+        cp "$jail_file" "$jail_backup"
+        log_warn "检测到现有 jail.local，已备份到: $jail_backup"
+    fi
+
+    # 创建/覆盖脚本管理配置
+    cat > "$jail_file" <<EOF
+# Managed by vps-modular-init.sh
 [DEFAULT]
 # 封禁时间（秒）
 bantime = 3600
@@ -541,36 +762,34 @@ allowipv6 = auto
 EOF
 
     if [ -n "$banaction" ]; then
-        cat >> /etc/fail2ban/jail.local <<EOF
+        cat >> "$jail_file" <<EOF
 banaction = ${banaction}
 banaction_allports = ${banaction_allports}
 EOF
     fi
 
-    cat >> /etc/fail2ban/jail.local <<EOF
+    cat >> "$jail_file" <<EOF
 
 [sshd]
 enabled = true
 port = ${ssh_port}
 filter = sshd
+backend = systemd
+logpath = %(systemd_journal)s
+journalmatch = _SYSTEMD_UNIT=ssh.service + _SYSTEMD_UNIT=sshd.service + _COMM=sshd
 maxretry = 3
 bantime = 7200
 EOF
 
-    # Debian 12+/极简系统可能没有 /var/log/auth.log，改用 systemd backend
-    if [ ! -f /var/log/auth.log ]; then
-        cat >> /etc/fail2ban/jail.local <<EOF
-backend = systemd
-journalmatch = _COMM=sshd
-EOF
-        log_info "检测到 /var/log/auth.log 不存在，Fail2Ban 使用 systemd 日志后端"
-    else
-        echo "logpath = /var/log/auth.log" >> /etc/fail2ban/jail.local
-        log_info "Fail2Ban 使用 /var/log/auth.log"
-    fi
+    log_info "Fail2Ban 已配置为 journald 后端"
 
     if ! fail2ban-client -t >/dev/null 2>&1; then
-        log_error "Fail2Ban 配置校验失败，请检查 /etc/fail2ban/jail.local"
+        log_error "Fail2Ban 配置校验失败，请检查 $jail_file"
+        debug_file="$(mktemp)"
+        fail2ban-client -d >"$debug_file" 2>&1 || true
+        echo -e "\n${YELLOW}=== fail2ban-client -d (tail 80) ===${NC}"
+        tail -n 80 "$debug_file" || true
+        rm -f "$debug_file" || true
         return 1
     fi
 
@@ -578,12 +797,17 @@ EOF
     rm -f /var/run/fail2ban/fail2ban.sock /var/run/fail2ban/fail2ban.pid || true
     
     # 重启服务
+    systemctl stop fail2ban >/dev/null 2>&1 || true
     systemctl restart fail2ban
     systemctl enable fail2ban >/dev/null 2>&1 || true
     sleep 1
 
     if systemctl is-active --quiet fail2ban; then
         log_info "Fail2Ban 已配置并启动"
+        if ! fail2ban-client ping >/dev/null 2>&1; then
+            log_error "Fail2Ban 服务未正常响应"
+            return 1
+        fi
         if ! fail2ban-client status sshd; then
             log_warn "sshd jail 状态读取失败，输出 Fail2Ban 总状态供排查"
             fail2ban-client status || true
@@ -596,12 +820,23 @@ EOF
             echo -e "\n${YELLOW}=== /var/log/fail2ban.log (tail 80) ===${NC}"
             tail -n 80 /var/log/fail2ban.log || true
         fi
+        debug_file="$(mktemp)"
+        fail2ban-client -d >"$debug_file" 2>&1 || true
+        echo -e "\n${YELLOW}=== fail2ban-client -d (tail 80) ===${NC}"
+        tail -n 80 "$debug_file" || true
+        rm -f "$debug_file" || true
         return 1
     fi
 }
 
 # --- 测试函数 ---
 test_config() {
+    local report_user
+    local report_port
+
+    report_user="$(detect_admin_user || true)"
+    report_port="$(detect_sshd_port_runtime)"
+
     echo -e "\n${BLUE}=== 系统配置检查 ===${NC}\n"
     
     echo -e "${CYAN}主机名:${NC}"
@@ -610,23 +845,26 @@ test_config() {
     echo -e "\n${CYAN}系统时区:${NC}"
     timedatectl | grep "Time zone" || echo "无法获取时区信息"
     
-    if [ -n "$USERNAME" ]; then
+    if [ -n "$report_user" ]; then
         echo -e "\n${CYAN}用户信息:${NC}"
-        id "$USERNAME"
+        id "$report_user"
         
         echo -e "\n${CYAN}sudo 权限测试:${NC}"
-        if sudo -l -U "$USERNAME" >/dev/null 2>&1; then
+        if sudo -l -U "$report_user" >/dev/null 2>&1; then
             echo "✓ sudo 权限正常（需密码）"
         else
             echo "✗ sudo 权限异常"
         fi
         
         echo -e "\n${CYAN}Docker 组成员:${NC}"
-        groups "$USERNAME" | grep docker && echo "✓ 已加入 docker 组" || echo "✗ 未加入 docker 组"
+        groups "$report_user" | grep docker && echo "✓ 已加入 docker 组" || echo "✗ 未加入 docker 组"
+    else
+        echo -e "\n${CYAN}用户信息:${NC}"
+        echo "未检测到非 root 管理用户"
     fi
     
     echo -e "\n${CYAN}SSH 配置:${NC}"
-    echo "当前生效端口: $(detect_sshd_port)"
+    echo "当前生效端口: $report_port"
     grep "^Port" /etc/ssh/sshd_config || echo "Port 22 (默认)"
     grep "^PermitRootLogin" /etc/ssh/sshd_config || echo "PermitRootLogin (未显式配置)"
     grep "^PasswordAuthentication" /etc/ssh/sshd_config || echo "PasswordAuthentication (未显式配置)"
@@ -651,6 +889,9 @@ test_config() {
 
 # --- 一键初始化主流程 ---
 do_full_init() {
+    local final_ssh_port
+    local final_user
+
     if ! collect_full_info; then
         return
     fi
@@ -658,14 +899,19 @@ do_full_init() {
     step_upgrade
     step_hostname
     step_user
+    USER_PASSWORD=""
     step_ssh
     step_performance
     step_docker
     step_firewall
     step_fail2ban
     
-    local final_ssh_port
-    final_ssh_port=$(detect_sshd_port)
+    final_ssh_port=$(detect_sshd_port_runtime)
+    final_user="${USERNAME:-}"
+    if [ -z "$final_user" ] || ! id "$final_user" >/dev/null 2>&1; then
+        final_user="$(detect_admin_user || true)"
+    fi
+    [ -z "$final_user" ] && final_user="root"
     
     echo -e "\n${GREEN}========================================${NC}"
     echo -e "${GREEN}    🎉 VPS 初始化完成！${NC}"
@@ -673,7 +919,7 @@ do_full_init() {
     
     echo -e "${YELLOW}重要提醒：${NC}"
     echo -e "1. 云平台安全组放行端口: ${RED}$final_ssh_port (TCP)${NC}"
-    echo -e "2. 新终端测试登录: ${GREEN}ssh -p $final_ssh_port $USERNAME@$(hostname -I | awk '{print $1}')${NC}"
+    echo -e "2. 新终端测试登录: ${GREEN}ssh -p $final_ssh_port $final_user@$(hostname -I | awk '{print $1}')${NC}"
     echo -e "3. 测试密码登录和 sudo 权限"
     echo -e "4. 确认无误后再关闭当前终端\n"
     
@@ -682,10 +928,21 @@ do_full_init() {
 
 # --- 主菜单 ---
 show_menu() {
+    local choice
+    local cont
+    local runtime_port
+    local runtime_user
+
     while true; do
+        hydrate_runtime_defaults
+        runtime_port="$(detect_sshd_port_runtime)"
+        runtime_user="${USERNAME:-未检测到}"
+
         echo -e "\n${CYAN}============================================${NC}"
         echo -e "${CYAN}       VPS 初始化管理菜单 v2.0              ${NC}"
         echo -e "${CYAN}============================================${NC}"
+        echo -e "  当前检测: 用户 ${GREEN}${runtime_user}${NC} | SSH端口 ${GREEN}${runtime_port}${NC}"
+        echo -e "${CYAN}--------------------------------------------${NC}"
         echo -e "  ${GREEN}1)${NC} 一键全量初始化 ${YELLOW}(推荐新系统)${NC}"
         echo -e "  ${GREEN}2)${NC} 系统更新与基础软件"
         echo -e "  ${GREEN}3)${NC} 修改主机名"
@@ -712,25 +969,33 @@ show_menu() {
                 step_hostname
                 ;;
             4)
+                USER_PASSWORD=""
                 collect_username
                 collect_password
                 step_user
+                USER_PASSWORD=""
                 ;;
             5)
-                if [ -z "$USERNAME" ]; then
-                    log_error "请先创建用户（选项 4）"
-                else
-                    collect_ssh_port
-                    collect_ssh_key
-                    step_ssh
+                if [ -z "${USERNAME:-}" ] || ! id "$USERNAME" >/dev/null 2>&1; then
+                    USERNAME="$(detect_admin_user || true)"
                 fi
+                if [ -z "${USERNAME:-}" ]; then
+                    log_warn "未检测到可用用户，将手动输入用户名"
+                    collect_username
+                fi
+                collect_ssh_port
+                collect_ssh_key
+                step_ssh
                 ;;
             6)
                 collect_swap
                 step_performance
                 ;;
             7)
-                if [ -z "$USERNAME" ]; then
+                if [ -z "${USERNAME:-}" ] || ! id "$USERNAME" >/dev/null 2>&1; then
+                    USERNAME="$(detect_admin_user || true)"
+                fi
+                if [ -z "${USERNAME:-}" ]; then
                     log_warn "建议先创建用户，继续？(y/n)"
                     read -p "> " cont
                     [ "$cont" != "y" ] && continue
@@ -738,19 +1003,17 @@ show_menu() {
                 step_docker
                 ;;
             8)
-                if [ -z "$SSH_PORT" ] || [ "$SSH_PORT" = "22222" ]; then
-                    log_warn "当前 SSH_PORT=$SSH_PORT，确认？(y/n)"
-                    read -p "> " cont
-                    [ "$cont" != "y" ] && continue
-                fi
+                runtime_port="$(detect_sshd_port_runtime)"
+                log_warn "检测到当前 SSH 端口为 $runtime_port，确认继续配置 UFW？(y/n)"
+                read -p "> " cont
+                [ "$cont" != "y" ] && continue
                 step_firewall
                 ;;
             9)
-                if [ -z "$SSH_PORT" ] || [ "$SSH_PORT" = "22222" ]; then
-                    log_warn "当前 SSH_PORT=$SSH_PORT，确认？(y/n)"
-                    read -p "> " cont
-                    [ "$cont" != "y" ] && continue
-                fi
+                runtime_port="$(detect_sshd_port_runtime)"
+                log_warn "检测到当前 SSH 端口为 $runtime_port，确认继续配置 Fail2Ban？(y/n)"
+                read -p "> " cont
+                [ "$cont" != "y" ] && continue
                 step_fail2ban
                 ;;
             t|T)
@@ -781,4 +1044,5 @@ cat << "EOF"
 EOF
 echo -e "${NC}"
 
+hydrate_runtime_defaults
 show_menu

@@ -498,7 +498,8 @@ step_firewall() {
 step_fail2ban() {
     log_step "配置 Fail2Ban 防暴力破解"
     local ssh_port
-    local ssh_unit="ssh.service"
+    local banaction=""
+    local banaction_allports=""
     ssh_port=$(detect_sshd_port)
     if ! is_valid_port "$ssh_port"; then
         log_error "无法识别有效 SSH 端口，取消 Fail2Ban 配置"
@@ -508,8 +509,21 @@ step_fail2ban() {
     # 安装 Fail2Ban
     apt install fail2ban -y
     
-    if systemctl list-unit-files --type=service 2>/dev/null | awk '{print $1}' | grep -qx 'sshd.service'; then
-        ssh_unit="sshd.service"
+    # 优先使用 nftables，其次 iptables
+    if command -v nft >/dev/null 2>&1; then
+        banaction="nftables-multiport"
+        banaction_allports="nftables-allports"
+    elif command -v iptables >/dev/null 2>&1; then
+        banaction="iptables-multiport"
+        banaction_allports="iptables-allports"
+    else
+        apt install -y nftables >/dev/null 2>&1 || true
+        if command -v nft >/dev/null 2>&1; then
+            banaction="nftables-multiport"
+            banaction_allports="nftables-allports"
+        else
+            log_warn "未检测到 nft/iptables，Fail2Ban 可能无法正确封禁攻击源 IP"
+        fi
     fi
 
     # 创建本地配置
@@ -523,6 +537,17 @@ findtime = 600
 maxretry = 5
 # 忽略的 IP（本机）
 ignoreip = 127.0.0.1/8 ::1
+allowipv6 = auto
+EOF
+
+    if [ -n "$banaction" ]; then
+        cat >> /etc/fail2ban/jail.local <<EOF
+banaction = ${banaction}
+banaction_allports = ${banaction_allports}
+EOF
+    fi
+
+    cat >> /etc/fail2ban/jail.local <<EOF
 
 [sshd]
 enabled = true
@@ -536,7 +561,7 @@ EOF
     if [ ! -f /var/log/auth.log ]; then
         cat >> /etc/fail2ban/jail.local <<EOF
 backend = systemd
-journalmatch = _SYSTEMD_UNIT=${ssh_unit} + _COMM=sshd
+journalmatch = _COMM=sshd
 EOF
         log_info "检测到 /var/log/auth.log 不存在，Fail2Ban 使用 systemd 日志后端"
     else
@@ -548,6 +573,9 @@ EOF
         log_error "Fail2Ban 配置校验失败，请检查 /etc/fail2ban/jail.local"
         return 1
     fi
+
+    install -d -m 755 /var/run/fail2ban
+    rm -f /var/run/fail2ban/fail2ban.sock /var/run/fail2ban/fail2ban.pid || true
     
     # 重启服务
     systemctl restart fail2ban
@@ -564,6 +592,10 @@ EOF
         log_error "Fail2Ban 启动失败，输出最近日志："
         systemctl status fail2ban --no-pager -l || true
         journalctl -u fail2ban --no-pager -n 50 || true
+        if [ -f /var/log/fail2ban.log ]; then
+            echo -e "\n${YELLOW}=== /var/log/fail2ban.log (tail 80) ===${NC}"
+            tail -n 80 /var/log/fail2ban.log || true
+        fi
         return 1
     fi
 }

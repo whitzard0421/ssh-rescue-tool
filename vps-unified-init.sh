@@ -387,6 +387,69 @@ detect_openclaw_config_path() {
     printf '%s\n' "${home_dir}/.openclaw/openclaw.json"
 }
 
+detect_caddy_domain_from_caddyfile() {
+    local caddyfile="${CADDY_STACK_DIR}/Caddyfile"
+    if [ ! -f "$caddyfile" ]; then
+        return
+    fi
+
+    awk '
+        /^[[:space:]]*\{/ { in_global = 1; next }
+        in_global && /^[[:space:]]*\}/ { in_global = 0; next }
+        in_global { next }
+        /^[[:space:]]*#/ { next }
+        /^[[:space:]]*$/ { next }
+        /^[^[:space:]\{][^\{]*\{$/ {
+            line = $0
+            sub(/[[:space:]]*\{[[:space:]]*$/, "", line)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+            split(line, parts, /[[:space:]]*,?[[:space:]]*/)
+            print parts[1]
+            exit
+        }
+    ' "$caddyfile" 2>/dev/null || true
+}
+
+hydrate_openclaw_runtime_context() {
+    local detected_user
+    local detected_config
+    local detected_gateway_port
+    local detected_searxng_url
+    local detected_searxng_port
+    local detected_domain
+
+    detected_user="$(detect_openclaw_user || true)"
+    if [ -n "$detected_user" ] && id "$detected_user" >/dev/null 2>&1; then
+        OPENCLAW_USER="$detected_user"
+        detected_config="$(detect_openclaw_config_path "$detected_user")"
+        if [ -f "$detected_config" ]; then
+            OPENCLAW_CONFIG_PATH="$detected_config"
+            detected_gateway_port="$(json_get_file "$detected_config" '.gateway.port')"
+            if is_valid_port "$detected_gateway_port"; then
+                OPENCLAW_GATEWAY_PORT="$detected_gateway_port"
+            fi
+
+            detected_searxng_url="$(json_get_file "$detected_config" '.plugins.entries["openclaw-search"].config.baseUrl')"
+            detected_searxng_port="$(extract_port_from_url "$detected_searxng_url")"
+            if is_valid_port "$detected_searxng_port"; then
+                SEARXNG_BIND_PORT="$detected_searxng_port"
+            fi
+        fi
+    fi
+
+    if ! is_valid_port "${SEARXNG_BIND_PORT:-}"; then
+        detected_searxng_port="$(detect_searxng_port_from_docker || true)"
+        if is_valid_port "$detected_searxng_port"; then
+            SEARXNG_BIND_PORT="$detected_searxng_port"
+        fi
+    fi
+
+    detected_domain="$(detect_caddy_domain_from_caddyfile || true)"
+    if [ -n "$detected_domain" ]; then
+        OPENCLAW_DOMAIN="$detected_domain"
+    fi
+}
+
 detect_openclaw_service_name() {
     if systemctl list-unit-files --type=service 2>/dev/null | awk '{print $1}' | grep -qx "openclaw-gateway.service"; then
         echo "openclaw-gateway.service"
@@ -1887,18 +1950,40 @@ deploy_openclaw_stack() {
 verify_openclaw_stack() {
     log_step "验证 OpenClaw 整栈状态"
 
+    hydrate_openclaw_runtime_context
+
     systemctl status --no-pager openclaw-gateway || true
     docker compose -f "${SEARXNG_STACK_DIR}/compose.yaml" ps || true
     docker compose -f "${CADDY_STACK_DIR}/compose.yaml" ps || true
 
     echo ""
+    echo "检测结果："
+    echo "OpenClaw 用户：${OPENCLAW_USER:-未检测到}"
+    echo "OpenClaw 配置：${OPENCLAW_CONFIG_PATH:-未检测到}"
+    echo "OpenClaw 网关端口：${OPENCLAW_GATEWAY_PORT:-未检测到}"
+    echo "SearXNG 端口：${SEARXNG_BIND_PORT:-未检测到}"
+    echo "公网域名：${OPENCLAW_DOMAIN:-未检测到}"
+    echo ""
     echo "本地检查："
-    curl -fsSI "http://127.0.0.1:${OPENCLAW_GATEWAY_PORT}" || true
-    curl -fsS --max-time 10 "http://127.0.0.1:${SEARXNG_BIND_PORT}/search?q=test&format=json" >/dev/null && echo "SearXNG JSON API：正常" || echo "SearXNG JSON API：待确认"
+    if is_valid_port "${OPENCLAW_GATEWAY_PORT:-}"; then
+        curl -fsSI "http://127.0.0.1:${OPENCLAW_GATEWAY_PORT}" || true
+    else
+        echo "OpenClaw 网关端口：未检测到"
+    fi
+
+    if is_valid_port "${SEARXNG_BIND_PORT:-}"; then
+        curl -fsS --max-time 10 "http://127.0.0.1:${SEARXNG_BIND_PORT}/search?q=test&format=json" >/dev/null && echo "SearXNG JSON API：正常" || echo "SearXNG JSON API：待确认"
+    else
+        echo "SearXNG 端口：未检测到"
+    fi
 
     echo ""
     echo "公网检查："
-    curl -fsSI "https://${OPENCLAW_DOMAIN}" || echo "公网 HTTPS 检查失败，请确认 DNS 已指向这台 VPS"
+    if [ -n "${OPENCLAW_DOMAIN:-}" ]; then
+        curl -fsSI "https://${OPENCLAW_DOMAIN}" || echo "公网 HTTPS 检查失败，请确认 DNS 已指向这台 VPS"
+    else
+        echo "公网域名：未检测到，跳过 HTTPS 检查"
+    fi
 
     echo ""
     echo "OpenClaw 网关令牌已保存到：${OPENCLAW_SECRET_DIR}/gateway_token"
@@ -2065,9 +2150,6 @@ show_menu() {
                 do_openclaw_seamless_migration
                 ;;
             12)
-                if [ -z "$OPENCLAW_DOMAIN" ] || [ -z "$OPENCLAW_USER" ]; then
-                    log_warn "当前会话中未保留 OpenClaw 变量，将按固定路径继续验证。"
-                fi
                 verify_openclaw_stack
                 ;;
             13)

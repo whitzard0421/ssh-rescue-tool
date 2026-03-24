@@ -6,20 +6,18 @@
 - `vps-modular-init.sh`：原始 VPS 模块化初始化脚本
 - `vps-unified-init.sh`：合并版一键脚本，保留原有功能，并新增 OpenClaw / SearXNG / Caddy 部署与无缝迁移菜单
 
+以下示例默认你已经以 `root` 身份登录到全新 VPS。
+
 ## 1. SSH 紧急救援工具
 
 ```bash
-wget -O ssh-rescue.sh https://raw.githubusercontent.com/whitzard0421/ssh-rescue-tool/main/ssh-rescue.sh
-chmod +x ssh-rescue.sh
-./ssh-rescue.sh
+bash <(curl -fsSL https://raw.githubusercontent.com/whitzard0421/ssh-rescue-tool/main/ssh-rescue.sh)
 ```
 
 ## 2. 原始 VPS 模块化初始化脚本
 
 ```bash
-wget -O vps-modular-init.sh https://raw.githubusercontent.com/whitzard0421/ssh-rescue-tool/main/vps-modular-init.sh
-chmod +x vps-modular-init.sh
-sudo ./vps-modular-init.sh
+bash <(curl -fsSL https://raw.githubusercontent.com/whitzard0421/ssh-rescue-tool/main/vps-modular-init.sh)
 ```
 
 ## 3. 合并版一键脚本
@@ -32,9 +30,7 @@ sudo ./vps-modular-init.sh
 - 迁移现有 OpenClaw / SearXNG 到统一反代入口
 
 ```bash
-wget -O vps-unified-init.sh https://raw.githubusercontent.com/whitzard0421/ssh-rescue-tool/main/vps-unified-init.sh
-chmod +x vps-unified-init.sh
-sudo ./vps-unified-init.sh
+bash <(curl -fsSL https://raw.githubusercontent.com/whitzard0421/ssh-rescue-tool/main/vps-unified-init.sh)
 ```
 
 ## 其他

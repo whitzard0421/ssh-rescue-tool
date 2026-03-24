@@ -60,6 +60,7 @@ OPENCLAW_EXISTING_SEARXNG_PORT=""
 CADDY_IMAGE="caddy:2.10.2-alpine"
 SEARXNG_IMAGE="searxng/searxng:latest"
 SEARXNG_CONTAINER_NAME="searxng"
+OPENCLAW_SEARCH_PLUGIN_REPO="https://github.com/akr-n/openclaw-search.git"
 
 SEARXNG_STACK_DIR="/srv/infra/apps/searxng-openclaw"
 CADDY_STACK_DIR="/srv/infra/edge/caddy-openclaw"
@@ -351,6 +352,14 @@ extract_port_from_url() {
     printf '%s\n' "$url" | sed -nE 's#^[a-zA-Z]+://[^:/]+:([0-9]+).*$#\1#p' | head -n1
 }
 
+probe_searxng_json_api() {
+    local port="$1"
+    if ! is_valid_port "$port"; then
+        return 1
+    fi
+    curl -fsS --max-time 10 "http://127.0.0.1:${port}/search?q=test&format=json" >/dev/null
+}
+
 detect_openclaw_user() {
     local candidate
     local user
@@ -563,6 +572,22 @@ backup_file_with_timestamp() {
     if [ -f "$source" ]; then
         cp "$source" "${backup_dir}/$(basename "$source")"
     fi
+}
+
+install_openclaw_search_plugin() {
+    local tmp_root
+    local plugin_dir
+
+    tmp_root="$(mktemp -d /tmp/openclaw-search.XXXXXX)"
+    plugin_dir="${tmp_root}/openclaw-search"
+
+    git clone --depth 1 "$OPENCLAW_SEARCH_PLUGIN_REPO" "$plugin_dir" >/dev/null 2>&1
+
+    run_as_user "$OPENCLAW_USER" "openclaw plugins uninstall openclaw-search >/dev/null 2>&1 || true"
+    run_as_user "$OPENCLAW_USER" "openclaw plugins install \"$plugin_dir\""
+    run_as_user "$OPENCLAW_USER" "openclaw plugins enable openclaw-search" || true
+
+    rm -rf "$tmp_root"
 }
 
 run_as_user() {
@@ -1336,7 +1361,7 @@ collect_openclaw_migration_info() {
 
     existing_searxng_url="$(json_get_file "$OPENCLAW_CONFIG_PATH" '.plugins.entries["openclaw-search"].config.baseUrl')"
     existing_searxng_port="$(extract_port_from_url "$existing_searxng_url")"
-    if ! is_valid_port "$existing_searxng_port"; then
+    if ! probe_searxng_json_api "$existing_searxng_port"; then
         existing_searxng_port="$(detect_searxng_port_from_docker || true)"
     fi
     if is_valid_port "$existing_searxng_port"; then
@@ -1519,9 +1544,7 @@ configure_openclaw_search_plugin() {
     run_as_user "$OPENCLAW_USER" "openclaw config unset tools.web.search.apiKey" || true
     run_as_user "$OPENCLAW_USER" "openclaw config unset tools.web.search.provider" || true
 
-    run_as_user "$OPENCLAW_USER" "openclaw plugins uninstall openclaw-search >/dev/null 2>&1 || true"
-    run_as_user "$OPENCLAW_USER" "openclaw plugins install https://github.com/akr-n/openclaw-search.git"
-    run_as_user "$OPENCLAW_USER" "openclaw plugins enable openclaw-search" || true
+    install_openclaw_search_plugin
     run_as_user "$OPENCLAW_USER" "openclaw config set plugins.entries.openclaw-search.enabled true --json"
     run_as_user "$OPENCLAW_USER" "openclaw config set plugins.entries.openclaw-search.config.baseUrl \"http://127.0.0.1:${SEARXNG_BIND_PORT}\""
     run_as_user "$OPENCLAW_USER" "openclaw config set plugins.entries.openclaw-search.config.maxResults 10 --json"

@@ -61,6 +61,8 @@ CADDY_IMAGE="caddy:2.10.2-alpine"
 SEARXNG_IMAGE="searxng/searxng:2026.3.12-3d3a78f3a"
 SEARXNG_CONTAINER_NAME="searxng"
 OPENCLAW_SEARCH_PLUGIN_REPO="https://github.com/akr-n/openclaw-search.git"
+OPENCLAW_SEARCH_PLUGIN_SOURCE_DIR=""
+OPENCLAW_SEARCH_PLUGIN_SOURCE_ROOT=""
 
 SEARXNG_STACK_DIR="/srv/infra/apps/searxng-openclaw"
 CADDY_STACK_DIR="/srv/infra/edge/caddy-openclaw"
@@ -691,19 +693,16 @@ backup_file_with_timestamp() {
 }
 
 install_openclaw_search_plugin() {
-    local tmp_root
     local plugin_dir
 
-    tmp_root="$(mktemp -d /tmp/openclaw-search.XXXXXX)"
-    plugin_dir="${tmp_root}/openclaw-search"
-
-    git clone --depth 1 "$OPENCLAW_SEARCH_PLUGIN_REPO" "$plugin_dir" >/dev/null 2>&1
+    if ! prepare_openclaw_search_plugin_source; then
+        return 1
+    fi
+    plugin_dir="${OPENCLAW_SEARCH_PLUGIN_SOURCE_DIR}"
 
     run_as_user "$OPENCLAW_USER" "openclaw plugins uninstall openclaw-search >/dev/null 2>&1 || true"
     run_as_user "$OPENCLAW_USER" "openclaw plugins install \"$plugin_dir\""
     run_as_user "$OPENCLAW_USER" "openclaw plugins enable openclaw-search" || true
-
-    rm -rf "$tmp_root"
 }
 
 ensure_openclaw_plugin_allowlist() {
@@ -721,6 +720,40 @@ ensure_openclaw_plugin_allowlist() {
     merged_allow="$(printf '%s\n' "$existing_allow" | jq -c 'if index("openclaw-search") then . else . + ["openclaw-search"] end' 2>/dev/null || echo '["openclaw-search"]')"
 
     run_as_user "$OPENCLAW_USER" "openclaw config set plugins.allow '${merged_allow}' --json"
+}
+
+prepare_openclaw_search_plugin_source() {
+    local plugin_dir
+    local tmp_root
+
+    if [ -n "${OPENCLAW_SEARCH_PLUGIN_SOURCE_DIR:-}" ] && [ -d "${OPENCLAW_SEARCH_PLUGIN_SOURCE_DIR}" ]; then
+        return 0
+    fi
+
+    tmp_root="$(mktemp -d /tmp/openclaw-search.XXXXXX)"
+    plugin_dir="${tmp_root}/openclaw-search"
+
+    if ! git clone --depth 1 "$OPENCLAW_SEARCH_PLUGIN_REPO" "$plugin_dir" >/dev/null 2>&1; then
+        rm -rf "$tmp_root"
+        log_error "无法下载 openclaw-search 插件源码：${OPENCLAW_SEARCH_PLUGIN_REPO}"
+        return 1
+    fi
+
+    OPENCLAW_SEARCH_PLUGIN_SOURCE_ROOT="$tmp_root"
+    OPENCLAW_SEARCH_PLUGIN_SOURCE_DIR="$plugin_dir"
+}
+
+cleanup_openclaw_search_plugin_source() {
+    if [ -n "${OPENCLAW_SEARCH_PLUGIN_SOURCE_ROOT:-}" ] && [ -d "${OPENCLAW_SEARCH_PLUGIN_SOURCE_ROOT}" ]; then
+        rm -rf "${OPENCLAW_SEARCH_PLUGIN_SOURCE_ROOT}"
+    fi
+    OPENCLAW_SEARCH_PLUGIN_SOURCE_ROOT=""
+    OPENCLAW_SEARCH_PLUGIN_SOURCE_DIR=""
+}
+
+restore_openclaw_gateway_after_failure() {
+    log_warn "OpenClaw 配置过程中断，正在尝试恢复网关服务"
+    restart_openclaw_gateway >/dev/null 2>&1 || true
 }
 
 stop_openclaw_gateway_instances() {
@@ -1754,11 +1787,22 @@ apply_openclaw_gateway_settings() {
 configure_openclaw_gateway() {
     log_step "配置 OpenClaw 网关与插件"
 
-    apply_openclaw_gateway_settings
-
     write_openclaw_gateway_service
+    if ! prepare_openclaw_search_plugin_source; then
+        return 1
+    fi
+    if ! apply_openclaw_gateway_settings; then
+        cleanup_openclaw_search_plugin_source
+        restore_openclaw_gateway_after_failure
+        return 1
+    fi
+    cleanup_openclaw_search_plugin_source
+
     stop_openclaw_gateway_instances
-    systemctl restart openclaw-gateway
+    if ! systemctl restart openclaw-gateway; then
+        restore_openclaw_gateway_after_failure
+        return 1
+    fi
     log_info "OpenClaw 网关已配置完成"
 }
 
@@ -1895,8 +1939,20 @@ migrate_existing_openclaw_stack() {
         deploy_searxng
     fi
 
-    apply_openclaw_gateway_settings
-    restart_openclaw_gateway
+    if ! prepare_openclaw_search_plugin_source; then
+        return 1
+    fi
+    if ! apply_openclaw_gateway_settings; then
+        cleanup_openclaw_search_plugin_source
+        restore_openclaw_gateway_after_failure
+        return 1
+    fi
+    cleanup_openclaw_search_plugin_source
+
+    if ! restart_openclaw_gateway; then
+        restore_openclaw_gateway_after_failure
+        return 1
+    fi
 
     ensure_caddy_ports_available_for_migration
     deploy_caddy

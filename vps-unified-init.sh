@@ -631,7 +631,7 @@ collect_password() {
     fi
 
     if [ -n "${USERNAME:-}" ] && id "$USERNAME" >/dev/null 2>&1; then
-        read -r -p "用户 $USERNAME 已存在，是否重置密码？（是/否，默认否）: " reset_confirm
+        read -r -p "用户 $USERNAME 已存在，是否重置密码？(y/N): " reset_confirm
         if ! confirm_default_no "$reset_confirm"; then
             log_info "跳过密码更新"
             return
@@ -763,7 +763,7 @@ collect_full_info() {
     echo "  交换分区: $SWAP_SIZE"
     echo "  SSH 公钥: $([ -n "$SSH_KEY" ] && echo 已配置 || echo 已跳过)"
     echo ""
-    read -r -p "确认执行？（是/否，默认否）: " confirm
+    read -r -p "确认执行？(y/N): " confirm
     confirm_default_no "$confirm"
 }
 
@@ -1100,7 +1100,7 @@ enable_password_login() {
         return
     fi
 
-    read -r -p "现在开启密码登录吗？（是/否）: " confirm
+    read -r -p "现在开启密码登录吗？(y/N): " confirm
     answer_is_yes "$confirm" || return
 
     backup_file="/etc/ssh/sshd_config.backup.$(date +%s)"
@@ -1134,7 +1134,7 @@ disable_password_login() {
         return
     fi
 
-    read -r -p "现在关闭密码登录吗？（是/否）: " confirm
+    read -r -p "现在关闭密码登录吗？(y/N): " confirm
     answer_is_yes "$confirm" || return
 
     backup_file="/etc/ssh/sshd_config.backup.$(date +%s)"
@@ -1176,7 +1176,7 @@ generate_new_keypair() {
     cat "$tmpdir/$keyname"
     echo ""
 
-    read -r -p "是否将公钥追加到 /root/.ssh/authorized_keys？（是/否）: " add_key
+    read -r -p "是否将公钥追加到 /root/.ssh/authorized_keys？(y/N): " add_key
     if answer_is_yes "$add_key"; then
         mkdir -p /root/.ssh
         chmod 700 /root/.ssh
@@ -1279,7 +1279,7 @@ collect_openclaw_stack_info() {
         SEARXNG_LANGUAGE="$input"
     fi
 
-    read -r -p "是否启用仅允许 Cloudflare 回源的 80/443 收口？（是/否，默认否）: " input
+    read -r -p "是否启用仅允许 Cloudflare 回源的 80/443 收口？(y/N): " input
     if confirm_default_no "$input"; then
         USE_CLOUDFLARE_LOCKDOWN="y"
     else
@@ -1295,7 +1295,7 @@ collect_openclaw_stack_info() {
     echo "SearXNG 语言: $SEARXNG_LANGUAGE"
     echo "仅允许 Cloudflare 回源: $(yn_to_zh "$USE_CLOUDFLARE_LOCKDOWN")"
     echo ""
-    read -r -p "确认开始部署？（是/否，默认否）: " input
+    read -r -p "确认开始部署？(y/N): " input
     confirm_default_no "$input"
 }
 
@@ -1373,14 +1373,14 @@ collect_openclaw_migration_info() {
     fi
 
     if is_valid_port "${SEARXNG_BIND_PORT:-}"; then
-        read -r -p "检测到现有 SearXNG 端口 ${SEARXNG_BIND_PORT}，是否直接复用？（是/否，默认是）: " input
+        read -r -p "检测到现有 SearXNG 端口 ${SEARXNG_BIND_PORT}，是否直接复用？(Y/n): " input
         if answer_is_no "$input"; then
             OPENCLAW_REUSE_EXISTING_SEARXNG="n"
         else
             OPENCLAW_REUSE_EXISTING_SEARXNG="y"
         fi
     else
-        read -r -p "未自动检测到现有 SearXNG。是否手动填写一个已有实例的回环端口并复用？（是/否，默认否）: " input
+        read -r -p "未自动检测到现有 SearXNG。是否手动填写一个已有实例的回环端口并复用？(y/N): " input
         if confirm_default_no "$input"; then
             OPENCLAW_REUSE_EXISTING_SEARXNG="y"
         else
@@ -1405,7 +1405,7 @@ collect_openclaw_migration_info() {
                 [ -n "$container" ] || continue
                 echo "  容器: ${container} | 镜像: ${image} | 端口: ${ports:-未映射}"
             done <<< "$existing_searxng_containers"
-            read -r -p "部署新 SearXNG 前，是否先备份并清理这些旧容器？（是/否，默认是）: " input
+            read -r -p "部署新 SearXNG 前，是否先备份并清理这些旧容器？(Y/n): " input
             if confirm_default_yes "$input"; then
                 OPENCLAW_CLEANUP_EXISTING_SEARXNG="y"
             fi
@@ -1431,14 +1431,14 @@ collect_openclaw_migration_info() {
     fi
 
     if [ -n "$OPENCLAW_EXISTING_SERVICE" ]; then
-        read -r -p "检测到现有 OpenClaw 服务 ${OPENCLAW_EXISTING_SERVICE}，是否保持现有服务，不改为脚本接管？（是/否，默认是）: " input
+        read -r -p "检测到现有 OpenClaw 服务 ${OPENCLAW_EXISTING_SERVICE}，是否保持现有服务，不改为脚本接管？(Y/n): " input
         if answer_is_no "$input"; then
             OPENCLAW_TAKEOVER_EXISTING_SERVICE="y"
         else
             OPENCLAW_TAKEOVER_EXISTING_SERVICE="n"
         fi
     else
-        read -r -p "未检测到现有 OpenClaw systemd 服务，是否由脚本写入并接管 openclaw-gateway.service？（是/否，默认否）: " input
+        read -r -p "未检测到现有 OpenClaw systemd 服务，是否由脚本写入并接管 openclaw-gateway.service？(y/N): " input
         if confirm_default_no "$input"; then
             OPENCLAW_TAKEOVER_EXISTING_SERVICE="y"
         else
@@ -1446,7 +1446,7 @@ collect_openclaw_migration_info() {
         fi
     fi
 
-    read -r -p "是否开启仅允许 Cloudflare 回源的 80/443 收口？（是/否，默认否）: " input
+    read -r -p "是否开启仅允许 Cloudflare 回源的 80/443 收口？(y/N): " input
     if confirm_default_no "$input"; then
         USE_CLOUDFLARE_LOCKDOWN="y"
     else
@@ -1465,7 +1465,7 @@ collect_openclaw_migration_info() {
     echo "脚本接管 OpenClaw 服务: $(yn_to_zh "$OPENCLAW_TAKEOVER_EXISTING_SERVICE")"
     echo "仅允许 Cloudflare 回源: $(yn_to_zh "$USE_CLOUDFLARE_LOCKDOWN")"
     echo ""
-    read -r -p "确认开始迁移？（是/否，默认否）: " input
+    read -r -p "确认开始迁移？(y/N): " input
     confirm_default_no "$input"
 }
 
@@ -1698,7 +1698,7 @@ do_cleanup_existing_searxng() {
         echo ""
     done <<< "$detected_containers"
 
-    read -r -p "是否先备份元数据并清理这些旧 SearXNG 容器？（是/否，默认否）: " input
+    read -r -p "是否先备份元数据并清理这些旧 SearXNG 容器？(y/N): " input
     confirm_default_no "$input" || {
         log_warn "已取消"
         return
@@ -2130,13 +2130,13 @@ show_menu() {
                 ;;
             8)
                 runtime_port="$(detect_sshd_port_runtime)"
-                read -r -p "检测到当前 SSH 端口为 ${runtime_port}，现在重建 UFW 规则吗？（是/否，默认否）: " cont
+                read -r -p "检测到当前 SSH 端口为 ${runtime_port}，现在重建 UFW 规则吗？(y/N): " cont
                 confirm_default_no "$cont" || continue
                 step_firewall
                 ;;
             9)
                 runtime_port="$(detect_sshd_port_runtime)"
-                read -r -p "检测到当前 SSH 端口为 ${runtime_port}，现在配置 Fail2Ban 吗？（是/否，默认否）: " cont
+                read -r -p "检测到当前 SSH 端口为 ${runtime_port}，现在配置 Fail2Ban 吗？(y/N): " cont
                 confirm_default_no "$cont" || continue
                 step_fail2ban
                 ;;

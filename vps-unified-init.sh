@@ -59,6 +59,7 @@ OPENCLAW_EXISTING_SEARXNG_PORT=""
 
 CADDY_IMAGE="caddy:2.10.2-alpine"
 SEARXNG_IMAGE="searxng/searxng:latest"
+SEARXNG_CONTAINER_NAME="searxng"
 
 SEARXNG_STACK_DIR="/srv/infra/apps/searxng-openclaw"
 CADDY_STACK_DIR="/srv/infra/edge/caddy-openclaw"
@@ -1754,7 +1755,7 @@ deploy_searxng() {
 services:
   searxng:
     image: ${SEARXNG_IMAGE}
-    container_name: openclaw-searxng
+    container_name: ${SEARXNG_CONTAINER_NAME}
     restart: unless-stopped
     ports:
       - "127.0.0.1:${SEARXNG_BIND_PORT}:8080"

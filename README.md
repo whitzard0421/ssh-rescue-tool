@@ -1,23 +1,42 @@
-# SSH Emergency Rescue Tool
+# SSH Rescue Tool
 
-一键查看SSH配置和紧急开启密码登录的救援脚本
+这个仓库目前包含 3 个脚本：
 
-## 快速使用
+- `ssh-rescue.sh`：SSH 紧急救援工具
+- `vps-modular-init.sh`：原始 VPS 模块化初始化脚本
+- `vps-unified-init.sh`：合并版一键脚本，保留原有功能，并新增 OpenClaw / SearXNG / Caddy 部署与无缝迁移菜单
+
+## 1. SSH 紧急救援工具
+
 ```bash
-wget -O ssh-rescue https://raw.githubusercontent.com/whitzard0421/ssh-rescue-tool/main/ssh-rescue.sh
-chmod +x ssh-rescue
-./ssh-rescue
+wget -O ssh-rescue.sh https://raw.githubusercontent.com/whitzard0421/ssh-rescue-tool/main/ssh-rescue.sh
+chmod +x ssh-rescue.sh
+./ssh-rescue.sh
 ```
 
-## VPS Modular Init Script (Debian/Ubuntu)
-Debian/Ubuntu VPS 模块化初始化脚本（用户、SSH、安全、性能、Docker、防火墙、Fail2Ban）
+## 2. 原始 VPS 模块化初始化脚本
 
-### 快速使用
 ```bash
 wget -O vps-modular-init.sh https://raw.githubusercontent.com/whitzard0421/ssh-rescue-tool/main/vps-modular-init.sh
 chmod +x vps-modular-init.sh
 sudo ./vps-modular-init.sh
 ```
 
-## SwitchNet.bat
-Windows 桌面用于切换网络路由的脚本
+## 3. 合并版一键脚本
+
+适用场景：
+
+- 新 VPS 一键基础初始化
+- SSH 安全加固与紧急救援
+- 部署 OpenClaw + SearXNG + Caddy
+- 迁移现有 OpenClaw / SearXNG 到统一反代入口
+
+```bash
+wget -O vps-unified-init.sh https://raw.githubusercontent.com/whitzard0421/ssh-rescue-tool/main/vps-unified-init.sh
+chmod +x vps-unified-init.sh
+sudo ./vps-unified-init.sh
+```
+
+## 其他
+
+`SwitchNet.bat` 用于 Windows 桌面切换网络路由。

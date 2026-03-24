@@ -1594,6 +1594,9 @@ configure_openclaw_gateway() {
     run_as_user "$OPENCLAW_USER" "openclaw config set gateway.bind loopback"
     run_as_user "$OPENCLAW_USER" "openclaw config set gateway.controlUi.enabled true --json"
     run_as_user "$OPENCLAW_USER" "openclaw config set gateway.controlUi.basePath \"${OPENCLAW_CONTROL_PATH}\""
+    if [ -n "${OPENCLAW_DOMAIN:-}" ]; then
+        run_as_user "$OPENCLAW_USER" "openclaw config set gateway.controlUi.allowedOrigins '[\"https://${OPENCLAW_DOMAIN}\"]' --json"
+    fi
     run_as_user "$OPENCLAW_USER" "openclaw config set gateway.auth.mode token"
     run_as_user "$OPENCLAW_USER" "openclaw config set gateway.auth.token \"${OPENCLAW_GATEWAY_TOKEN}\""
     configure_openclaw_search_plugin

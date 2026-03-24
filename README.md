@@ -28,10 +28,13 @@ bash <(curl -fsSL https://raw.githubusercontent.com/whitzard0421/ssh-rescue-tool
 - SSH 安全加固与紧急救援
 - 部署 OpenClaw + SearXNG + Caddy
 - 迁移现有 OpenClaw / SearXNG 到统一反代入口
+- 自动输出 OpenClaw Control UI 首次带令牌访问地址，降低 `1006 / token_missing` 首访报错
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/whitzard0421/ssh-rescue-tool/main/vps-unified-init.sh)
 ```
+
+首次通过域名访问 OpenClaw 时，优先使用脚本验证阶段打印的“首次带令牌访问”地址；如果网页随后提示需要设备配对，再按提示执行 `openclaw devices list` 完成授权。
 
 ## 其他
 

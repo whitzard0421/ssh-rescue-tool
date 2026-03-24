@@ -706,6 +706,23 @@ install_openclaw_search_plugin() {
     rm -rf "$tmp_root"
 }
 
+ensure_openclaw_plugin_allowlist() {
+    local config_path
+    local existing_allow
+    local merged_allow
+
+    config_path="${OPENCLAW_CONFIG_PATH:-}"
+    if [ -z "$config_path" ]; then
+        config_path="$(detect_openclaw_config_path "$OPENCLAW_USER")"
+        OPENCLAW_CONFIG_PATH="$config_path"
+    fi
+
+    existing_allow="$(jq -c '.plugins.allow // [] | if type == "array" then . else [] end' "$config_path" 2>/dev/null || echo '[]')"
+    merged_allow="$(printf '%s\n' "$existing_allow" | jq -c 'if index("openclaw-search") then . else . + ["openclaw-search"] end' 2>/dev/null || echo '["openclaw-search"]')"
+
+    run_as_user "$OPENCLAW_USER" "openclaw config set plugins.allow '${merged_allow}' --json"
+}
+
 stop_openclaw_gateway_instances() {
     local gateway_port="${OPENCLAW_GATEWAY_PORT:-18789}"
     local pid
@@ -1692,13 +1709,14 @@ EOF
 }
 
 configure_openclaw_search_plugin() {
+    ensure_openclaw_plugin_allowlist
     run_as_user "$OPENCLAW_USER" "openclaw config set gateway.trustedProxies '[\"127.0.0.1\",\"::1\"]' --json"
     run_as_user "$OPENCLAW_USER" "openclaw config set tools.web.search.enabled false --json" || true
     run_as_user "$OPENCLAW_USER" "openclaw config unset tools.web.search.apiKey >/dev/null 2>&1 || true" || true
     run_as_user "$OPENCLAW_USER" "openclaw config unset tools.web.search.provider >/dev/null 2>&1 || true" || true
 
     install_openclaw_search_plugin
-    run_as_user "$OPENCLAW_USER" "openclaw config set plugins.allow '[\"openclaw-search\"]' --json"
+    ensure_openclaw_plugin_allowlist
     run_as_user "$OPENCLAW_USER" "openclaw config set plugins.entries.openclaw-search.enabled true --json"
     run_as_user "$OPENCLAW_USER" "openclaw config set plugins.entries.openclaw-search.config.baseUrl \"http://127.0.0.1:${SEARXNG_BIND_PORT}\""
     run_as_user "$OPENCLAW_USER" "openclaw config set plugins.entries.openclaw-search.config.maxResults 10 --json"
@@ -1719,6 +1737,7 @@ ensure_openclaw_gateway_token() {
 apply_openclaw_gateway_settings() {
     ensure_openclaw_gateway_token
     stop_openclaw_gateway_instances
+    ensure_openclaw_plugin_allowlist
     run_as_user "$OPENCLAW_USER" "openclaw config set gateway.mode local"
     run_as_user "$OPENCLAW_USER" "openclaw config set gateway.port ${OPENCLAW_GATEWAY_PORT} --json"
     run_as_user "$OPENCLAW_USER" "openclaw config set gateway.bind loopback"

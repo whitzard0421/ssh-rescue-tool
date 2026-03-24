@@ -54,6 +54,8 @@ OPENCLAW_EXISTING_SERVICE=""
 OPENCLAW_BACKUP_DIR=""
 OPENCLAW_REUSE_EXISTING_SEARXNG="y"
 OPENCLAW_TAKEOVER_EXISTING_SERVICE="n"
+OPENCLAW_CLEANUP_EXISTING_SEARXNG="n"
+OPENCLAW_EXISTING_SEARXNG_PORT=""
 
 CADDY_IMAGE="caddy:2.10.2-alpine"
 SEARXNG_IMAGE="searxng/searxng:latest"
@@ -409,6 +411,85 @@ detect_searxng_port_from_docker() {
     port="$(docker ps --format '{{.Names}} {{.Ports}}' 2>/dev/null | grep -i 'searx' | sed -nE 's/.*0\.0\.0\.0:([0-9]+)->8080\/tcp.*/\1/p' | head -n1)"
     if is_valid_port "$port"; then
         echo "$port"
+    fi
+}
+
+list_existing_searxng_containers() {
+    if ! command_exists docker; then
+        return
+    fi
+
+    docker ps -a --format '{{.Names}}\t{{.Image}}\t{{.Ports}}' 2>/dev/null | awk '
+        BEGIN { IGNORECASE = 1 }
+        $1 ~ /searx/ || $2 ~ /searx/ { print }
+    '
+}
+
+port_is_in_use() {
+    local port="$1"
+    if ! is_valid_port "$port"; then
+        return 1
+    fi
+    ss -ltn "( sport = :${port} )" 2>/dev/null | awk 'NR > 1 { found = 1 } END { exit found ? 0 : 1 }'
+}
+
+suggest_fresh_searxng_port() {
+    local candidate
+    for candidate in 8888 8787 8381 8081 18080; do
+        if ! port_is_in_use "$candidate"; then
+            echo "$candidate"
+            return
+        fi
+    done
+    echo "8888"
+}
+
+backup_existing_searxng_metadata() {
+    local backup_dir="$1"
+    local container
+    local image
+    local ports
+
+    if ! command_exists docker; then
+        return 0
+    fi
+
+    list_existing_searxng_containers > "${backup_dir}/searxng-containers.txt" 2>/dev/null || true
+
+    while IFS=$'\t' read -r container image ports; do
+        [ -n "$container" ] || continue
+        docker inspect "$container" > "${backup_dir}/searxng-${container}.inspect.json" 2>/dev/null || true
+        docker logs --tail 200 "$container" > "${backup_dir}/searxng-${container}.log" 2>&1 || true
+    done < <(list_existing_searxng_containers || true)
+}
+
+cleanup_existing_searxng_containers() {
+    local container
+    local image
+    local ports
+    local found="n"
+
+    if ! command_exists docker; then
+        log_warn "未安装 Docker，无法自动清理旧 SearXNG 容器"
+        return 0
+    fi
+
+    while IFS=$'\t' read -r container image ports; do
+        [ -n "$container" ] || continue
+        found="y"
+        log_info "正在清理旧 SearXNG 容器：${container}（${image}）"
+        docker rm -f "$container" >/dev/null
+    done < <(list_existing_searxng_containers || true)
+
+    if [ "$found" = "n" ]; then
+        log_info "未检测到需要清理的 SearXNG Docker 容器"
+    fi
+}
+
+ensure_searxng_target_port_available() {
+    if port_is_in_use "$SEARXNG_BIND_PORT"; then
+        log_error "目标 SearXNG 端口 ${SEARXNG_BIND_PORT} 已被占用，请更换端口或先清理旧实例"
+        return 1
     fi
 }
 
@@ -1162,6 +1243,8 @@ collect_openclaw_migration_info() {
     local existing_searxng_url
     local existing_searxng_port
     local existing_service
+    local existing_searxng_containers
+    local suggested_new_port
 
     detected_user="$(detect_openclaw_user || true)"
     if [ -z "$detected_user" ]; then
@@ -1193,8 +1276,13 @@ collect_openclaw_migration_info() {
         existing_searxng_port="$(detect_searxng_port_from_docker || true)"
     fi
     if is_valid_port "$existing_searxng_port"; then
+        OPENCLAW_EXISTING_SEARXNG_PORT="$existing_searxng_port"
         SEARXNG_BIND_PORT="$existing_searxng_port"
+    else
+        OPENCLAW_EXISTING_SEARXNG_PORT=""
     fi
+
+    OPENCLAW_CLEANUP_EXISTING_SEARXNG="n"
 
     existing_service="$(detect_openclaw_service_name || true)"
     OPENCLAW_EXISTING_SERVICE="${existing_service:-}"
@@ -1246,6 +1334,28 @@ collect_openclaw_migration_info() {
             SEARXNG_BIND_PORT="$input"
         fi
     else
+        existing_searxng_containers="$(list_existing_searxng_containers || true)"
+        if [ -n "$existing_searxng_containers" ]; then
+            echo "检测到以下现有 SearXNG 容器："
+            while IFS=$'\t' read -r container image ports; do
+                [ -n "$container" ] || continue
+                echo "  容器: ${container} | 镜像: ${image} | 端口: ${ports:-未映射}"
+            done <<< "$existing_searxng_containers"
+            read -r -p "部署新 SearXNG 前，是否先备份并清理这些旧容器？（是/否，默认是）: " input
+            if confirm_default_yes "$input"; then
+                OPENCLAW_CLEANUP_EXISTING_SEARXNG="y"
+            fi
+        fi
+
+        if [ "$OPENCLAW_CLEANUP_EXISTING_SEARXNG" = "y" ] && is_valid_port "${OPENCLAW_EXISTING_SEARXNG_PORT:-}"; then
+            SEARXNG_BIND_PORT="$OPENCLAW_EXISTING_SEARXNG_PORT"
+        else
+            suggested_new_port="$(suggest_fresh_searxng_port)"
+            if [ -z "${SEARXNG_BIND_PORT:-}" ] || [ "${SEARXNG_BIND_PORT:-}" = "${OPENCLAW_EXISTING_SEARXNG_PORT:-}" ] || port_is_in_use "$SEARXNG_BIND_PORT"; then
+                SEARXNG_BIND_PORT="$suggested_new_port"
+            fi
+        fi
+
         read -r -p "新的 SearXNG 回环端口（默认 ${SEARXNG_BIND_PORT}）: " input
         if [ -n "$input" ]; then
             if ! is_valid_port "$input"; then
@@ -1286,6 +1396,7 @@ collect_openclaw_migration_info() {
     echo "当前网关端口: $OPENCLAW_GATEWAY_PORT"
     echo "现有服务: ${OPENCLAW_EXISTING_SERVICE:-未检测到}"
     echo "复用现有 SearXNG: $(yn_to_zh "$OPENCLAW_REUSE_EXISTING_SEARXNG")"
+    echo "清理现有 SearXNG: $(yn_to_zh "$OPENCLAW_CLEANUP_EXISTING_SEARXNG")"
     echo "SearXNG 端口: $SEARXNG_BIND_PORT"
     echo "脚本接管 OpenClaw 服务: $(yn_to_zh "$OPENCLAW_TAKEOVER_EXISTING_SERVICE")"
     echo "仅允许 Cloudflare 回源: $(yn_to_zh "$USE_CLOUDFLARE_LOCKDOWN")"
@@ -1390,6 +1501,7 @@ backup_existing_openclaw_state() {
 
     OPENCLAW_BACKUP_DIR="$backup_dir"
     backup_file_with_timestamp "$OPENCLAW_CONFIG_PATH" "$backup_dir"
+    backup_existing_searxng_metadata "$backup_dir"
 
     if [ -n "${OPENCLAW_EXISTING_SERVICE:-}" ]; then
         service_path="/etc/systemd/system/${OPENCLAW_EXISTING_SERVICE}"
@@ -1413,6 +1525,7 @@ openclaw_gateway_port=${OPENCLAW_GATEWAY_PORT}
 searxng_bind_port=${SEARXNG_BIND_PORT}
 openclaw_domain=${OPENCLAW_DOMAIN}
 reuse_existing_searxng=${OPENCLAW_REUSE_EXISTING_SEARXNG}
+cleanup_existing_searxng=${OPENCLAW_CLEANUP_EXISTING_SEARXNG}
 takeover_existing_service=${OPENCLAW_TAKEOVER_EXISTING_SERVICE}
 EOF
 
@@ -1477,6 +1590,10 @@ migrate_existing_openclaw_stack() {
     if [ "$OPENCLAW_REUSE_EXISTING_SEARXNG" = "y" ]; then
         verify_existing_searxng
     else
+        if [ "$OPENCLAW_CLEANUP_EXISTING_SEARXNG" = "y" ]; then
+            cleanup_existing_searxng_containers
+        fi
+        ensure_searxng_target_port_available
         deploy_searxng
     fi
 
@@ -1491,6 +1608,48 @@ migrate_existing_openclaw_stack() {
 
     echo ""
     echo "迁移备份目录: ${OPENCLAW_BACKUP_DIR}"
+}
+
+do_cleanup_existing_searxng() {
+    local detected_containers
+    local backup_root
+    local backup_dir
+    local input
+    local container
+    local image
+    local ports
+
+    detected_containers="$(list_existing_searxng_containers || true)"
+    if [ -z "$detected_containers" ]; then
+        log_warn "未检测到现有 SearXNG Docker 容器"
+        return
+    fi
+
+    title "检测到现有 SearXNG 容器"
+    while IFS=$'\t' read -r container image ports; do
+        [ -n "$container" ] || continue
+        echo "容器: ${container}"
+        echo "镜像: ${image}"
+        echo "端口: ${ports:-未映射}"
+        echo ""
+    done <<< "$detected_containers"
+
+    read -r -p "是否先备份元数据并清理这些旧 SearXNG 容器？（是/否，默认否）: " input
+    confirm_default_no "$input" || {
+        log_warn "已取消"
+        return
+    }
+
+    backup_root="/root/.vps-unified-init/backups"
+    backup_dir="${backup_root}/searxng-cleanup-$(date +%Y%m%d%H%M%S)"
+    ensure_dir 0700 "$backup_root"
+    ensure_dir 0700 "$backup_dir"
+
+    backup_existing_searxng_metadata "$backup_dir"
+    cleanup_existing_searxng_containers
+
+    echo ""
+    echo "清理前备份目录: ${backup_dir}"
 }
 
 write_searxng_settings() {
@@ -1841,6 +2000,7 @@ show_menu() {
         echo "11) 无缝迁移现有 OpenClaw / SearXNG"
         echo "12) 验证 OpenClaw 整栈状态"
         echo "13) SSH 紧急救援工具"
+        echo "14) 清理现有 SearXNG 容器"
         echo "t) 查看当前系统状态"
         echo "q) 退出"
         echo ""
@@ -1912,6 +2072,9 @@ show_menu() {
                 ;;
             13)
                 ssh_rescue_menu
+                ;;
+            14)
+                do_cleanup_existing_searxng
                 ;;
             t|T)
                 test_config

@@ -1642,9 +1642,21 @@ restart_openclaw_gateway() {
 }
 
 verify_existing_searxng() {
-    if curl -fsS --max-time 10 "http://127.0.0.1:${SEARXNG_BIND_PORT}/search?q=test&format=json" >/dev/null; then
+    local input
+
+    if probe_searxng_json_api "$SEARXNG_BIND_PORT"; then
         log_info "已复用现有 SearXNG: 127.0.0.1:${SEARXNG_BIND_PORT}"
         return 0
+    fi
+
+    log_warn "现有 SearXNG 健康检查失败：127.0.0.1:${SEARXNG_BIND_PORT}"
+    if [ -n "$(list_existing_searxng_containers || true)" ]; then
+        read -r -p "现有 SearXNG 不可用，是否改为备份并清理旧容器后重新部署？(Y/n): " input
+        if confirm_default_yes "$input"; then
+            OPENCLAW_REUSE_EXISTING_SEARXNG="n"
+            OPENCLAW_CLEANUP_EXISTING_SEARXNG="y"
+            return 10
+        fi
     fi
 
     log_error "无法访问现有 SearXNG: 127.0.0.1:${SEARXNG_BIND_PORT}"
@@ -1675,8 +1687,17 @@ migrate_existing_openclaw_stack() {
     backup_existing_openclaw_state
 
     if [ "$OPENCLAW_REUSE_EXISTING_SEARXNG" = "y" ]; then
-        verify_existing_searxng
-    else
+        if verify_existing_searxng; then
+            :
+        else
+            verify_status=$?
+            if [ "$verify_status" -ne 10 ]; then
+                return "$verify_status"
+            fi
+        fi
+    fi
+
+    if [ "$OPENCLAW_REUSE_EXISTING_SEARXNG" != "y" ]; then
         if [ "$OPENCLAW_CLEANUP_EXISTING_SEARXNG" = "y" ]; then
             cleanup_existing_searxng_containers
         fi

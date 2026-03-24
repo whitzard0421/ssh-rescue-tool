@@ -360,6 +360,32 @@ probe_searxng_json_api() {
     curl -fsS --max-time 10 "http://127.0.0.1:${port}/search?q=test&format=json" >/dev/null
 }
 
+probe_openclaw_gateway_http() {
+    local port="$1"
+    if ! is_valid_port "$port"; then
+        return 1
+    fi
+    curl -fsSI --max-time 10 "http://127.0.0.1:${port}" >/dev/null
+}
+
+wait_for_http_probe() {
+    local description="$1"
+    local timeout_seconds="$2"
+    shift 2
+    local elapsed=0
+
+    while [ "$elapsed" -lt "$timeout_seconds" ]; do
+        if "$@"; then
+            return 0
+        fi
+        sleep 2
+        elapsed=$((elapsed + 2))
+    done
+
+    log_warn "${description} 在 ${timeout_seconds} 秒内仍未就绪"
+    return 1
+}
+
 detect_openclaw_user() {
     local candidate
     local user
@@ -1996,6 +2022,14 @@ verify_openclaw_stack() {
     log_step "验证 OpenClaw 整栈状态"
 
     hydrate_openclaw_runtime_context
+
+    if is_valid_port "${OPENCLAW_GATEWAY_PORT:-}"; then
+        wait_for_http_probe "OpenClaw 本地网关" 30 probe_openclaw_gateway_http "$OPENCLAW_GATEWAY_PORT" || true
+    fi
+
+    if [ -n "${OPENCLAW_DOMAIN:-}" ]; then
+        wait_for_http_probe "公网 HTTPS" 90 curl -fsSI --max-time 10 "https://${OPENCLAW_DOMAIN}" || true
+    fi
 
     systemctl status --no-pager openclaw-gateway || true
     docker compose -f "${SEARXNG_STACK_DIR}/compose.yaml" ps || true

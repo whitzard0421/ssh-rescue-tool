@@ -141,11 +141,11 @@ confirm_default_yes() {
     answer_is_yes "$answer"
 }
 
-yn_to_zh() {
+yn_to_label() {
     if [ "${1:-n}" = "y" ]; then
-        echo "是"
+        echo "Y"
     else
-        echo "否"
+        echo "N"
     fi
 }
 
@@ -1293,7 +1293,7 @@ collect_openclaw_stack_info() {
     echo "控制界面路径: $OPENCLAW_CONTROL_PATH"
     echo "SearXNG 端口: $SEARXNG_BIND_PORT"
     echo "SearXNG 语言: $SEARXNG_LANGUAGE"
-    echo "仅允许 Cloudflare 回源: $(yn_to_zh "$USE_CLOUDFLARE_LOCKDOWN")"
+    echo "仅允许 Cloudflare 回源: $(yn_to_label "$USE_CLOUDFLARE_LOCKDOWN")"
     echo ""
     read -r -p "确认开始部署？(y/N): " input
     confirm_default_no "$input"
@@ -1459,11 +1459,11 @@ collect_openclaw_migration_info() {
     echo "公网域名: $OPENCLAW_DOMAIN"
     echo "当前网关端口: $OPENCLAW_GATEWAY_PORT"
     echo "现有服务: ${OPENCLAW_EXISTING_SERVICE:-未检测到}"
-    echo "复用现有 SearXNG: $(yn_to_zh "$OPENCLAW_REUSE_EXISTING_SEARXNG")"
-    echo "清理现有 SearXNG: $(yn_to_zh "$OPENCLAW_CLEANUP_EXISTING_SEARXNG")"
+    echo "复用现有 SearXNG: $(yn_to_label "$OPENCLAW_REUSE_EXISTING_SEARXNG")"
+    echo "清理现有 SearXNG: $(yn_to_label "$OPENCLAW_CLEANUP_EXISTING_SEARXNG")"
     echo "SearXNG 端口: $SEARXNG_BIND_PORT"
-    echo "脚本接管 OpenClaw 服务: $(yn_to_zh "$OPENCLAW_TAKEOVER_EXISTING_SERVICE")"
-    echo "仅允许 Cloudflare 回源: $(yn_to_zh "$USE_CLOUDFLARE_LOCKDOWN")"
+    echo "脚本接管 OpenClaw 服务: $(yn_to_label "$OPENCLAW_TAKEOVER_EXISTING_SERVICE")"
+    echo "仅允许 Cloudflare 回源: $(yn_to_label "$USE_CLOUDFLARE_LOCKDOWN")"
     echo ""
     read -r -p "确认开始迁移？(y/N): " input
     confirm_default_no "$input"

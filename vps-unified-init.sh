@@ -1557,7 +1557,7 @@ ensure_openclaw_installed() {
 
     apt-get install -y curl git jq ca-certificates
     log_info "准备为 $OPENCLAW_USER 安装 OpenClaw"
-    run_as_user "$OPENCLAW_USER" "curl -fsSL --proto '=https' --tlsv1.2 https://openclaw.ai/install-cli.sh | bash"
+    run_as_user "$OPENCLAW_USER" "curl -fsSL --proto '=https' --tlsv1.2 https://openclaw.ai/install.sh | bash -s -- --no-prompt --no-onboard"
 }
 
 write_openclaw_gateway_service() {
@@ -1576,7 +1576,7 @@ User=${OPENCLAW_USER}
 WorkingDirectory=${user_home}
 Environment=HOME=${user_home}
 Environment=PATH=${user_home}/.openclaw/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=/bin/bash -lc 'openclaw gateway'
+ExecStart=/bin/bash -lc 'openclaw gateway --port ${OPENCLAW_GATEWAY_PORT}'
 ExecStop=/bin/bash -lc 'openclaw gateway stop || true'
 Restart=on-failure
 RestartSec=5
@@ -1596,6 +1596,7 @@ configure_openclaw_search_plugin() {
     run_as_user "$OPENCLAW_USER" "openclaw config unset tools.web.search.provider" || true
 
     install_openclaw_search_plugin
+    run_as_user "$OPENCLAW_USER" "openclaw config set plugins.allow '[\"openclaw-search\"]' --json"
     run_as_user "$OPENCLAW_USER" "openclaw config set plugins.entries.openclaw-search.enabled true --json"
     run_as_user "$OPENCLAW_USER" "openclaw config set plugins.entries.openclaw-search.config.baseUrl \"http://127.0.0.1:${SEARXNG_BIND_PORT}\""
     run_as_user "$OPENCLAW_USER" "openclaw config set plugins.entries.openclaw-search.config.maxResults 10 --json"
@@ -1604,16 +1605,17 @@ configure_openclaw_search_plugin() {
     run_as_user "$OPENCLAW_USER" "openclaw config set plugins.entries.openclaw-search.config.timeout 15 --json"
 }
 
-configure_openclaw_gateway() {
-    log_step "配置 OpenClaw 网关与插件"
-
+ensure_openclaw_gateway_token() {
     ensure_dir 0700 "$OPENCLAW_SECRET_DIR"
     if [ ! -s "${OPENCLAW_SECRET_DIR}/gateway_token" ]; then
         random_hex 32 > "${OPENCLAW_SECRET_DIR}/gateway_token"
         chmod 0600 "${OPENCLAW_SECRET_DIR}/gateway_token"
     fi
     OPENCLAW_GATEWAY_TOKEN="$(cat "${OPENCLAW_SECRET_DIR}/gateway_token")"
+}
 
+apply_openclaw_gateway_settings() {
+    ensure_openclaw_gateway_token
     run_as_user "$OPENCLAW_USER" "openclaw config set gateway.mode local"
     run_as_user "$OPENCLAW_USER" "openclaw config set gateway.port ${OPENCLAW_GATEWAY_PORT} --json"
     run_as_user "$OPENCLAW_USER" "openclaw config set gateway.bind loopback"
@@ -1625,6 +1627,12 @@ configure_openclaw_gateway() {
     run_as_user "$OPENCLAW_USER" "openclaw config set gateway.auth.mode token"
     run_as_user "$OPENCLAW_USER" "openclaw config set gateway.auth.token \"${OPENCLAW_GATEWAY_TOKEN}\""
     configure_openclaw_search_plugin
+}
+
+configure_openclaw_gateway() {
+    log_step "配置 OpenClaw 网关与插件"
+
+    apply_openclaw_gateway_settings
 
     write_openclaw_gateway_service
     stop_openclaw_gateway_instances
@@ -1762,9 +1770,7 @@ migrate_existing_openclaw_stack() {
         deploy_searxng
     fi
 
-    run_as_user "$OPENCLAW_USER" "openclaw config set gateway.port ${OPENCLAW_GATEWAY_PORT} --json"
-    run_as_user "$OPENCLAW_USER" "openclaw config set gateway.bind loopback"
-    configure_openclaw_search_plugin
+    apply_openclaw_gateway_settings
     restart_openclaw_gateway
 
     ensure_caddy_ports_available_for_migration
@@ -1899,6 +1905,9 @@ ${OPENCLAW_DOMAIN} {
 		X-Frame-Options "SAMEORIGIN"
 		Referrer-Policy "strict-origin-when-cross-origin"
 	}
+
+	@root path /
+	redir @root ${OPENCLAW_CONTROL_PATH} 302
 
 	reverse_proxy 127.0.0.1:${OPENCLAW_GATEWAY_PORT} {
 		header_up X-Forwarded-Host {host}
@@ -2073,6 +2082,9 @@ verify_openclaw_stack() {
     echo "OpenClaw 网关端口：${OPENCLAW_GATEWAY_PORT:-未检测到}"
     echo "SearXNG 端口：${SEARXNG_BIND_PORT:-未检测到}"
     echo "公网域名：${OPENCLAW_DOMAIN:-未检测到}"
+    if [ -n "${OPENCLAW_DOMAIN:-}" ]; then
+        echo "访问入口：https://${OPENCLAW_DOMAIN}${OPENCLAW_CONTROL_PATH}"
+    fi
     echo ""
     echo "本地检查："
     if is_valid_port "${OPENCLAW_GATEWAY_PORT:-}"; then

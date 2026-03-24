@@ -532,6 +532,22 @@ port_is_in_use() {
     ss -ltn "( sport = :${port} )" 2>/dev/null | awk 'NR > 1 { found = 1 } END { exit found ? 0 : 1 }'
 }
 
+wait_for_port_release() {
+    local port="$1"
+    local timeout_seconds="${2:-15}"
+    local elapsed=0
+
+    while [ "$elapsed" -lt "$timeout_seconds" ]; do
+        if ! port_is_in_use "$port"; then
+            return 0
+        fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+
+    return 1
+}
+
 suggest_fresh_searxng_port() {
     local candidate
     for candidate in 8888 8787 8381 8081 18080; do
@@ -614,6 +630,14 @@ install_openclaw_search_plugin() {
     run_as_user "$OPENCLAW_USER" "openclaw plugins enable openclaw-search" || true
 
     rm -rf "$tmp_root"
+}
+
+stop_openclaw_gateway_instances() {
+    local gateway_port="${OPENCLAW_GATEWAY_PORT:-18789}"
+
+    systemctl stop openclaw-gateway >/dev/null 2>&1 || true
+    run_as_user "$OPENCLAW_USER" "openclaw gateway stop >/dev/null 2>&1 || true" || true
+    wait_for_port_release "$gateway_port" 15 || true
 }
 
 run_as_user() {
@@ -1553,6 +1577,7 @@ WorkingDirectory=${user_home}
 Environment=HOME=${user_home}
 Environment=PATH=${user_home}/.openclaw/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=/bin/bash -lc 'openclaw gateway'
+ExecStop=/bin/bash -lc 'openclaw gateway stop || true'
 Restart=on-failure
 RestartSec=5
 
@@ -1602,6 +1627,7 @@ configure_openclaw_gateway() {
     configure_openclaw_search_plugin
 
     write_openclaw_gateway_service
+    stop_openclaw_gateway_instances
     systemctl restart openclaw-gateway
     log_info "OpenClaw 网关已配置完成"
 }
@@ -1650,6 +1676,8 @@ EOF
 
 restart_openclaw_gateway() {
     local user_home
+
+    stop_openclaw_gateway_instances
 
     if [ "$OPENCLAW_TAKEOVER_EXISTING_SERVICE" = "y" ]; then
         write_openclaw_gateway_service
